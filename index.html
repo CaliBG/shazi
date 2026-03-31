@@ -1,1 +1,449 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>互动装置演示</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Helvetica Neue', sans-serif;
+    color: #e0e0e0;
+    overflow: hidden;
+  }
+  canvas#main { display: block; }
+  #info {
+    position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+    text-align: center; z-index: 10; pointer-events: none;
+  }
+  #info h1 { font-size: 22px; font-weight: 300; letter-spacing: 4px; color: #fff; margin-bottom: 6px; }
+  #info p { font-size: 13px; opacity: 0.6; letter-spacing: 1px; }
+  #bar { position: fixed; right: 30px; top: 50%; transform: translateY(-50%); width: 6px; height: 200px; background: rgba(255,255,255,0.1); border-radius: 3px; z-index: 10; }
+  #bar-fill { position: absolute; bottom: 0; width: 100%; height: 0%; border-radius: 3px; background: #4ecca3; transition: height 0.3s, background 0.3s; }
+  #bar-label { position: fixed; right: 18px; top: calc(50% + 115px); font-size: 11px; opacity: 0.5; z-index: 10; }
+  #state { position: fixed; left: 30px; bottom: 30px; font-size: 13px; letter-spacing: 2px; z-index: 10; }
+  #cam { position: fixed; left: 20px; top: 80px; width: 160px; height: 120px; border-radius: 8px; border: 2px solid rgba(255,255,255,0.15); object-fit: cover; z-index: 10; transform: scaleX(-1); background: #000; }
+  #cam-overlay { position: fixed; left: 20px; top: 80px; width: 160px; height: 120px; border-radius: 8px; z-index: 11; pointer-events: none; transform: scaleX(-1); }
+  #cam-label { position: fixed; left: 20px; top: 206px; font-size: 11px; opacity: 0.5; z-index: 10; width: 160px; text-align: center; }
+  #debug { position: fixed; left: 20px; top: 224px; font-size: 11px; color: rgba(255,255,255,0.6); z-index: 10; line-height: 1.8; font-family: monospace; }
+  #start-btn {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 100;
+    padding: 16px 40px; font-size: 18px; font-family: inherit;
+    background: rgba(78,204,163,0.2); color: #4ecca3;
+    border: 1px solid rgba(78,204,163,0.5); border-radius: 8px;
+    cursor: pointer; letter-spacing: 2px;
+  }
+  #start-btn:hover { background: rgba(78,204,163,0.35); }
+</style>
+</head>
+<body>
 
+<div id="info">
+  <h1>沙 痕 装 置</h1>
+  <p>靠近或远离摄像头以触发交互</p>
+</div>
+<div id="bar"><div id="bar-fill"></div></div>
+<div id="bar-label">距离</div>
+<div id="state">● 等待摄像头</div>
+
+<video id="cam" autoplay playsinline muted></video>
+<canvas id="cam-overlay" width="160" height="120"></canvas>
+<div id="cam-label">摄像头画面</div>
+<div id="debug"></div>
+
+<button id="start-btn">开启摄像头</button>
+
+<canvas id="main"></canvas>
+
+<script>
+// ========== DOM ==========
+const mainCanvas = document.getElementById('main');
+const ctx = mainCanvas.getContext('2d');
+const video = document.getElementById('cam');
+const camOverlay = document.getElementById('cam-overlay');
+const camCtx = camOverlay.getContext('2d');
+const barFill = document.getElementById('bar-fill');
+const stateEl = document.getElementById('state');
+const debugEl = document.getElementById('debug');
+const startBtn = document.getElementById('start-btn');
+
+let W, H;
+function resize() { W = mainCanvas.width = innerWidth; H = mainCanvas.height = innerHeight; }
+resize();
+addEventListener('resize', resize);
+
+// ========== CAMERA DETECTION ==========
+let cameraReady = false;
+let detectedProximity = 0;
+let baselineArea = null;
+let calibrationFrames = 0;
+const CALIBRATION_COUNT = 20;
+
+// For frame analysis
+const fc = document.createElement('canvas');
+fc.width = 320; fc.height = 240;
+const fctx = fc.getContext('2d', { willReadFrequently: true });
+
+startBtn.onclick = async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 320 }, height: { ideal: 240 } }
+    });
+    video.srcObject = stream;
+    await video.play();
+    cameraReady = true;
+    startBtn.style.display = 'none';
+    detectLoop();
+  } catch (e) {
+    startBtn.textContent = '摄像头不可用';
+    startBtn.style.color = '#e74c3c';
+    startBtn.style.borderColor = '#e74c3c';
+  }
+};
+
+function detectLoop() {
+  if (!cameraReady) return;
+
+  try {
+    fctx.drawImage(video, 0, 0, 320, 240);
+    const imgData = fctx.getImageData(0, 0, 320, 240);
+    const data = imgData.data;
+
+    // Count bright/skin-like pixels in center region
+    let centerPixels = 0;
+    let totalChecked = 0;
+
+    for (let y = 40; y < 200; y += 4) {
+      for (let x = 60; x < 260; x += 4) {
+        const i = (y * 320 + x) * 4;
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        const brightness = (r + g + b) / 3;
+        // Count pixels that are reasonably bright (person in frame)
+        if (brightness > 60) centerPixels++;
+        totalChecked++;
+      }
+    }
+
+    const fillRatio = centerPixels / totalChecked;
+
+    // Calibration: record baseline during first N frames
+    if (calibrationFrames < CALIBRATION_COUNT) {
+      if (baselineArea === null) baselineArea = fillRatio;
+      else baselineArea = baselineArea * 0.8 + fillRatio * 0.2;
+      calibrationFrames++;
+      debugEl.innerHTML = `校准中... ${calibrationFrames}/${CALIBRATION_COUNT}<br>当前值: ${(fillRatio * 100).toFixed(1)}%`;
+    } else {
+      // Compare to baseline: if significantly more pixels → closer
+      const change = (fillRatio - baselineArea) / Math.max(baselineArea, 0.01);
+      // change > 0.3 means 30% more pixels than baseline → getting closer
+      const target = Math.min(1, Math.max(0, change / 0.4));
+      detectedProximity = detectedProximity * 0.8 + target * 0.2;
+
+      debugEl.innerHTML =
+        `基准: ${(baselineArea * 100).toFixed(1)}%<br>` +
+        `当前: ${(fillRatio * 100).toFixed(1)}%<br>` +
+        `变化: ${(change * 100).toFixed(1)}%<br>` +
+        `距离值: ${detectedProximity.toFixed(2)}`;
+    }
+
+    // Draw indicator on overlay
+    camCtx.clearRect(0, 0, 160, 120);
+    camCtx.strokeStyle = 'rgba(255,255,255,0.2)';
+    camCtx.strokeRect(30, 20, 100, 80);
+    const barW = 150 * Math.min(1, detectedProximity);
+    camCtx.fillStyle = detectedProximity > 0.35 ? 'rgba(231,76,60,0.7)' : 'rgba(78,204,163,0.7)';
+    camCtx.fillRect(5, 112, barW, 5);
+
+  } catch (e) {
+    debugEl.textContent = '检测错误: ' + e.message;
+  }
+
+  setTimeout(detectLoop, 100);
+}
+
+// ========== DEVICE STATE ==========
+let proximity = 0;
+let servoAngle = 0;
+let servoSpeed = 0.02;
+let ledR = 78, ledG = 204, ledB = 163;
+let motorVib = 0;
+
+// Sand
+const sandW = 320, sandH = 320;
+const sandCvs = document.createElement('canvas');
+sandCvs.width = sandW; sandCvs.height = sandH;
+const sandCtx = sandCvs.getContext('2d');
+
+// Pendulum
+let pendAngle = 0.3; // start with some swing
+let pendVel = 0;
+let lastTipX = null, lastTipY = null;
+
+const ropeLen = 110;
+const GRAVITY = 0.0004;
+
+// Layout
+const upperR = 120, lowerR = 140, pillarH = 160;
+const cx = () => W / 2;
+const plateY = () => H / 2 + 90;
+const servoBaseY = () => plateY() - pillarH;
+
+// ========== UPDATE ==========
+function update(dt) {
+  // Proximity from camera
+  const target = cameraReady ? detectedProximity : 0;
+  proximity += (target - proximity) * 0.05;
+  const isClose = proximity > 0.35;
+
+  // UI
+  barFill.style.height = (proximity * 100) + '%';
+  barFill.style.background = isClose ? '#e74c3c' : '#4ecca3';
+  if (!cameraReady) {
+    stateEl.textContent = '● 等待摄像头';
+    stateEl.style.color = '#888';
+  } else if (calibrationFrames < CALIBRATION_COUNT) {
+    stateEl.textContent = '● 校准中...请保持正常坐姿';
+    stateEl.style.color = '#f0c040';
+  } else if (isClose) {
+    stateEl.textContent = '● 靠近 — 沙面重置中';
+    stateEl.style.color = '#e74c3c';
+  } else {
+    stateEl.textContent = '● 远离 — 沙痕绘制中';
+    stateEl.style.color = '#4ecca3';
+  }
+
+  // LED
+  const tR = isClose ? 231 : 78, tG = isClose ? 76 : 204, tB = isClose ? 60 : 163;
+  ledR += (tR - ledR) * 0.05;
+  ledG += (tG - ledG) * 0.05;
+  ledB += (tB - ledB) * 0.05;
+
+  // Servo
+  const tSpeed = isClose ? 0 : 0.02;
+  servoSpeed += (tSpeed - servoSpeed) * 0.02;
+  servoAngle += servoSpeed * dt;
+
+  // Pendulum
+  if (!isClose) {
+    pendVel += Math.cos(servoAngle * 0.7) * 0.00012 * dt;
+  }
+  pendVel -= Math.sin(pendAngle) * GRAVITY * dt;
+  pendVel *= isClose ? 0.994 : 0.9998;
+  pendAngle += pendVel * dt;
+
+  // Pendulum tip in sand-canvas coords
+  const anchorOffX = Math.cos(servoAngle) * 15;
+  const anchorOffY = Math.sin(servoAngle) * 15;
+  const tipX = sandW / 2 + anchorOffX + Math.sin(pendAngle) * ropeLen;
+  const tipY = sandH / 2 + anchorOffY;
+
+  // Draw trail on sand
+  if (!isClose && Math.abs(pendAngle) > 0.005 && lastTipX !== null) {
+    const dist = Math.sqrt((tipX - lastTipX) ** 2 + (tipY - lastTipY) ** 2);
+    if (dist > 0.5 && dist < 50) {
+      sandCtx.beginPath();
+      sandCtx.moveTo(lastTipX, lastTipY);
+      sandCtx.lineTo(tipX, tipY);
+      sandCtx.strokeStyle = 'rgba(210, 180, 140, 0.6)';
+      sandCtx.lineWidth = 3;
+      sandCtx.lineCap = 'round';
+      sandCtx.stroke();
+    }
+  }
+  lastTipX = tipX;
+  lastTipY = tipY;
+
+  // Motor & sand smoothing
+  const tMotor = isClose ? 1 : 0;
+  motorVib += (tMotor - motorVib) * 0.03;
+  if (motorVib > 0.3) {
+    sandCtx.fillStyle = `rgba(58, 53, 32, ${motorVib * 0.015})`;
+    sandCtx.fillRect(0, 0, sandW, sandH);
+  }
+}
+
+// ========== DRAW ==========
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  const x = cx();
+  const pY = plateY();
+  const sY = servoBaseY();
+  const vib = motorVib * (Math.random() - 0.5) * 3;
+
+  // ---- Sand plate (lower) ----
+  ctx.save();
+  ctx.translate(vib, 0);
+
+  // Shadow
+  ctx.beginPath();
+  ctx.ellipse(x, pY + 12, lowerR + 10, 30, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.fill();
+
+  // Side
+  ctx.beginPath();
+  ctx.ellipse(x, pY + 8, lowerR, 25, 0, 0, Math.PI);
+  ctx.fillStyle = '#2a2a3e';
+  ctx.fill();
+
+  // Top with sand
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(x, pY, lowerR, 25, 0, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.fillStyle = '#3a3520';
+  ctx.fillRect(x - lowerR, pY - 30, lowerR * 2, 60);
+  const sg = ctx.createRadialGradient(x, pY, 0, x, pY, lowerR);
+  sg.addColorStop(0, 'rgba(194,168,120,0.35)');
+  sg.addColorStop(0.7, 'rgba(160,140,100,0.25)');
+  sg.addColorStop(1, 'rgba(100,85,60,0.2)');
+  ctx.fillStyle = sg;
+  ctx.fillRect(x - lowerR, pY - 30, lowerR * 2, 60);
+
+  // Project sand trails
+  ctx.save();
+  const sy = 25 / (sandH / 2);
+  ctx.translate(x, pY);
+  ctx.scale(lowerR / (sandW / 2), sy);
+  ctx.translate(-sandW / 2, -sandH / 2);
+  ctx.globalAlpha = 0.8;
+  ctx.drawImage(sandCvs, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.restore();
+  ctx.restore(); // clip
+
+  // Rim
+  ctx.beginPath();
+  ctx.ellipse(x, pY, lowerR, 25, 0, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(180,180,200,0.3)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Motor
+  const mp = motorVib * Math.sin(Date.now() * 0.05) * 2;
+  ctx.beginPath();
+  ctx.arc(x + mp, pY + 15, 8, 0, Math.PI * 2);
+  ctx.fillStyle = motorVib > 0.3 ? 'rgba(231,76,60,0.6)' : 'rgba(100,100,120,0.4)';
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.font = '8px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('M', x + mp, pY + 18);
+
+  ctx.restore(); // vib
+
+  // ---- Pillars ----
+  const pR = upperR * 0.75;
+  for (const a of [0, Math.PI * 2 / 3, Math.PI * 4 / 3]) {
+    const bx = x + Math.cos(a) * pR;
+    const tx = x + Math.cos(a) * pR * 0.6;
+    ctx.beginPath(); ctx.moveTo(bx, pY - 5); ctx.lineTo(tx, sY + 5);
+    ctx.strokeStyle = 'rgba(180,200,220,0.6)'; ctx.lineWidth = 4; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(bx - 1, pY - 5); ctx.lineTo(tx - 1, sY + 5);
+    ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.lineWidth = 1; ctx.stroke();
+  }
+
+  // ---- Servo platform (upper) ----
+  ctx.beginPath();
+  ctx.ellipse(x, sY, upperR * 0.5, 12, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#2d2d44';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(180,180,200,0.3)'; ctx.lineWidth = 1.5; ctx.stroke();
+
+  // Servo body
+  ctx.fillStyle = '#3a3a55';
+  ctx.fillRect(x - 15, sY - 20, 30, 18);
+  ctx.strokeStyle = 'rgba(200,200,220,0.3)';
+  ctx.strokeRect(x - 15, sY - 20, 30, 18);
+
+  // Servo horn
+  ctx.save();
+  ctx.translate(x, sY - 11);
+  ctx.rotate(servoAngle);
+  ctx.beginPath(); ctx.moveTo(-20, 0); ctx.lineTo(20, 0);
+  ctx.strokeStyle = 'rgba(255,255,255,0.6)'; ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 0, 4, 0, Math.PI * 2);
+  ctx.fillStyle = '#666'; ctx.fill();
+  ctx.restore();
+
+  // ---- LED ----
+  const lc = `rgba(${Math.round(ledR)},${Math.round(ledG)},${Math.round(ledB)},`;
+  const gg = ctx.createRadialGradient(x + 35, sY - 15, 0, x + 35, sY - 15, 30);
+  gg.addColorStop(0, lc + '0.4)');
+  gg.addColorStop(1, lc + '0)');
+  ctx.fillStyle = gg;
+  ctx.fillRect(x + 5, sY - 45, 60, 60);
+  ctx.beginPath(); ctx.arc(x + 35, sY - 15, 5, 0, Math.PI * 2);
+  ctx.fillStyle = lc + '1)'; ctx.fill();
+  ctx.beginPath(); ctx.arc(x + 34, sY - 16, 2, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.fill();
+
+  // ---- Rope & Pendulum ----
+  const anchorX = x + Math.cos(servoAngle) * 15;
+  const anchorY = sY - 11;
+  const tipX = x + Math.cos(servoAngle) * 15 + Math.sin(pendAngle) * ropeLen;
+  const tipBaseY = anchorY + ropeLen * Math.cos(pendAngle);
+  const tipY = Math.min(tipBaseY, pY - 8);
+
+  ctx.beginPath();
+  ctx.moveTo(anchorX, anchorY);
+  ctx.quadraticCurveTo((anchorX + tipX) / 2, (anchorY + tipY) / 2 + 5, tipX, tipY);
+  ctx.strokeStyle = 'rgba(200,180,150,0.7)'; ctx.lineWidth = 1.5; ctx.stroke();
+
+  ctx.beginPath(); ctx.arc(tipX, tipY, 8, 0, Math.PI * 2);
+  const wg = ctx.createRadialGradient(tipX - 2, tipY - 2, 0, tipX, tipY, 8);
+  wg.addColorStop(0, '#888'); wg.addColorStop(1, '#444');
+  ctx.fillStyle = wg; ctx.fill();
+  ctx.strokeStyle = 'rgba(200,200,200,0.3)'; ctx.lineWidth = 1; ctx.stroke();
+
+  // ---- Sensor ----
+  ctx.save();
+  ctx.translate(x - 45, sY - 18);
+  ctx.fillStyle = '#3a3a55';
+  ctx.fillRect(-8, -5, 16, 10);
+  ctx.beginPath(); ctx.arc(-3, 0, 3, 0, Math.PI * 2); ctx.arc(3, 0, 3, 0, Math.PI * 2);
+  ctx.fillStyle = '#555'; ctx.fill();
+  const wa = 0.15 + proximity * 0.3;
+  for (let i = 1; i <= 3; i++) {
+    ctx.beginPath(); ctx.arc(-3, 0, 5 + i * 6, -0.8, 0.8);
+    ctx.strokeStyle = `rgba(100,200,255,${wa / i})`; ctx.lineWidth = 1; ctx.stroke();
+  }
+  ctx.restore();
+
+  // ---- Labels ----
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  ctx.font = '10px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('超声波传感器', x - 85, sY - 30);
+  ctx.fillText('舵机', x - 10, sY - 28);
+  ctx.textAlign = 'right';
+  ctx.fillText('LED', x + 52, sY - 25);
+  ctx.textAlign = 'center';
+  ctx.fillText('重锤', tipX + 20, tipY);
+  ctx.fillText('细沙', x, pY + 5);
+  ctx.fillText('马达', x, pY + 30);
+}
+
+// ========== LOOP ==========
+let lastT = performance.now();
+function loop(t) {
+  try {
+    const dt = Math.min(t - lastT, 50);
+    lastT = t;
+    update(dt);
+    draw();
+  } catch (e) {
+    debugEl.textContent = '动画错误: ' + e.message;
+  }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
