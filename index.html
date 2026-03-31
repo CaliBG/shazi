@@ -111,59 +111,72 @@ function detectLoop() {
 
   try {
     fctx.drawImage(video, 0, 0, 320, 240);
-    const imgData = fctx.getImageData(0, 0, 320, 240);
-    const data = imgData.data;
 
-    // Count bright/skin-like pixels in center region
-    let centerPixels = 0;
-    let totalChecked = 0;
+    // Strategy: measure how much of the center is filled with skin-tone colors
+    // When close (<30cm), face fills most of the center area
+    const centerData = fctx.getImageData(60, 30, 200, 180).data;
 
-    for (let y = 40; y < 200; y += 4) {
-      for (let x = 60; x < 260; x += 4) {
-        const i = (y * 320 + x) * 4;
-        const r = data[i], g = data[i + 1], b = data[i + 2];
-        const brightness = (r + g + b) / 3;
-        // Count pixels that are reasonably bright (person in frame)
-        if (brightness > 60) centerPixels++;
-        totalChecked++;
-      }
+    let skinCount = 0;
+    let totalSampled = 0;
+
+    for (let i = 0; i < centerData.length; i += 8) { // sample every 2nd pixel
+      const r = centerData[i], g = centerData[i+1], b = centerData[i+2];
+
+      // Broad skin detection (works across skin tones)
+      // Method: check if pixel is warm-toned and not too dark/bright
+      const max = Math.max(r, g, b);
+      const min = Math.min(r, g, b);
+      const brightness = (r + g + b) / 3;
+
+      const isSkin = (
+        brightness > 40 && brightness < 230 &&
+        (r > g - 10) && (r > b) &&
+        (max - min > 10) &&
+        (r - b > 5)
+      );
+
+      if (isSkin) skinCount++;
+      totalSampled++;
     }
 
-    const fillRatio = centerPixels / totalChecked;
+    const skinRatio = skinCount / totalSampled;
 
-    // Calibration: record baseline during first N frames
+    // Calibration phase
     if (calibrationFrames < CALIBRATION_COUNT) {
-      if (baselineArea === null) baselineArea = fillRatio;
-      else baselineArea = baselineArea * 0.8 + fillRatio * 0.2;
+      if (baselineArea === null) baselineArea = skinRatio;
+      else baselineArea = baselineArea * 0.7 + skinRatio * 0.3;
       calibrationFrames++;
-      debugEl.innerHTML = `校准中... ${calibrationFrames}/${CALIBRATION_COUNT}<br>当前值: ${(fillRatio * 100).toFixed(1)}%`;
+      debugEl.innerHTML = `校准中... ${calibrationFrames}/${CALIBRATION_COUNT}<br>请保持正常坐姿<br>肤色占比: ${(skinRatio * 100).toFixed(1)}%`;
     } else {
-      // Compare to baseline: if significantly more pixels → closer
-      const change = (fillRatio - baselineArea) / Math.max(baselineArea, 0.01);
-      // change > 0.3 means 30% more pixels than baseline → getting closer
-      const target = Math.min(1, Math.max(0, change / 0.4));
-      detectedProximity = detectedProximity * 0.8 + target * 0.2;
+      // Simple threshold: skin > 70% = close
+      const skinPct = skinRatio * 100;
+      const target = skinPct >= 70 ? 1 : Math.max(0, (skinPct - 50) / 20);
+      detectedProximity = detectedProximity * 0.7 + target * 0.3;
 
       debugEl.innerHTML =
-        `基准: ${(baselineArea * 100).toFixed(1)}%<br>` +
-        `当前: ${(fillRatio * 100).toFixed(1)}%<br>` +
-        `变化: ${(change * 100).toFixed(1)}%<br>` +
-        `距离值: ${detectedProximity.toFixed(2)}`;
+        `肤色占比: ${skinPct.toFixed(1)}% ${skinPct >= 70 ? '🔴' : '🟢'}<br>` +
+        `阈值: 70%<br>` +
+        `距离值: ${detectedProximity.toFixed(2)}<br>` +
+        `状态: ${detectedProximity > 0.35 ? '🔴 靠近 (舵机停)' : '🟢 远离 (舵机转)'}`;
     }
 
     // Draw indicator on overlay
     camCtx.clearRect(0, 0, 160, 120);
-    camCtx.strokeStyle = 'rgba(255,255,255,0.2)';
-    camCtx.strokeRect(30, 20, 100, 80);
+    // Show detection region
+    camCtx.strokeStyle = 'rgba(255,255,255,0.25)';
+    camCtx.strokeRect(30, 15, 100, 90);
+    // Proximity bar
     const barW = 150 * Math.min(1, detectedProximity);
-    camCtx.fillStyle = detectedProximity > 0.35 ? 'rgba(231,76,60,0.7)' : 'rgba(78,204,163,0.7)';
-    camCtx.fillRect(5, 112, barW, 5);
+    camCtx.fillStyle = detectedProximity > 0.35 ? 'rgba(231,76,60,0.8)' : 'rgba(78,204,163,0.8)';
+    camCtx.fillRect(5, 112, barW, 6);
+    camCtx.strokeStyle = 'rgba(255,255,255,0.3)';
+    camCtx.strokeRect(5, 112, 150, 6);
 
   } catch (e) {
     debugEl.textContent = '检测错误: ' + e.message;
   }
 
-  setTimeout(detectLoop, 100);
+  setTimeout(detectLoop, 80);
 }
 
 // ========== DEVICE STATE ==========
